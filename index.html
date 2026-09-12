@@ -6,7 +6,7 @@
 
   <title>Absensi Guru</title>
 
-  <script src="https://unpkg.com/html5-qrcode"></script>
+  <script src="https://unpkg.com/qr-scanner@1.4.2/qr-scanner.umd.min.js"></script>
 
   <style>
     * { box-sizing: border-box; }
@@ -71,6 +71,55 @@
       width: 100%;
     }
 
+    /* =====================================================
+       BANNER / PESAN HARIAN
+       ===================================================== */
+    #pesanHarian {
+      display: none;
+      margin: 0 0 18px;
+      border-radius: 14px;
+      overflow: hidden;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      box-shadow: 0 3px 12px rgba(0,0,0,.06);
+    }
+
+    #pesanHarian.gambar {
+      background: #fff;
+    }
+
+    #pesanHarian img {
+      display: block;
+      width: 100%;
+      height: auto;
+      max-height: 280px;
+      object-fit: cover;
+    }
+
+    #pesanHarian .pesan-teks {
+      padding: 18px;
+      text-align: center;
+      font-size: 17px;
+      line-height: 1.6;
+      font-weight: 600;
+      white-space: pre-line;
+    }
+
+    #pesanHarian .pesan-tanggal {
+      padding: 0 18px 15px;
+      text-align: center;
+      font-size: 12px;
+      color: #64748b;
+    }
+
+    #pesanHarian.loading {
+      display: block;
+      padding: 14px;
+      text-align: center;
+      color: #64748b;
+      font-size: 14px;
+    }
+
     #status {
       display: none;
       margin-top: 15px;
@@ -96,6 +145,30 @@
       background: #fee2e2;
       color: #991b1b;
     }
+
+    /* =====================================================
+       QR SCANNER SUPER SENSITIF
+       ===================================================== */
+    #reader {
+      width: 100%;
+      min-height: 260px;
+      overflow: hidden;
+      border-radius: 14px;
+      background: #111827;
+    }
+
+    #reader video {
+      width: 100% !important;
+      height: auto !important;
+      display: block;
+      object-fit: cover;
+      border-radius: 14px;
+    }
+
+    #reader canvas {
+      display: none !important;
+    }
+
   </style>
 </head>
 
@@ -119,11 +192,16 @@
       </button>
     </div>
 
+    <!-- =================================================
+         PESAN / BANNER HARIAN
+         Diisi otomatis dari Google Apps Script.
+         ================================================= -->
+    <div id="pesanHarian"></div>
+
     <button id="btnCamera" onclick="startScanner()">
       BUKA KAMERA & SCAN QR
     </button>
-
-    <div id="reader"></div>
+<div id="reader"></div>
 
     <div id="status"></div>
 
@@ -132,79 +210,206 @@
 
 
 <script>
-
 const WEB_APP_URL =
-  'https://script.google.com/macros/s/AKfycbywBHRx0nve-VI954J7K_SLyHiotXdkGY7duHEI4Pomgb9tIQM8GQiTi-4KwQZNnrhg/exec';
+  'https://script.google.com/macros/s/AKfycbwMuSuHGR7NpmrP_OY9qdWJCBRUwV-ILOCuZxqZVbbZxGW1KmzPcdUVh0AtgbRnb2fk/exec';
 
 let mode = 'MASUK';
 let scanner = null;
 let sedangProses = false;
+let cameraStream = null;
+let cameraTrack = null;
+let autoZoomTimer = null;
+let lastZoom = null;
+let scanStartedAt = 0;
 
-
-// =====================================================
-// PILIH MODE
-// =====================================================
-
-function setMode(pilihan) {
-
-  mode = pilihan;
-
-  document.getElementById('masuk').className = 'mode';
-  document.getElementById('pulang').className = 'mode';
-
-  if (mode === 'MASUK') {
-    document.getElementById('masuk').className =
-      'mode active';
-  } else {
-    document.getElementById('pulang').className =
-      'mode active';
-  }
-
+function getLocalDateKey() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + d;
 }
 
+/* =====================================================
+   MODE ABSENSI
+   ===================================================== */
+function setMode(pilihan) {
+  if (sedangProses) return;
+  mode = pilihan;
 
-// =====================================================
-// STATUS
-// =====================================================
+  document.getElementById('masuk').className =
+    mode === 'MASUK' ? 'mode active' : 'mode';
 
+  document.getElementById('pulang').className =
+    mode === 'PULANG' ? 'mode active' : 'mode';
+}
+
+/* =====================================================
+   PESAN / BANNER HARIAN
+   ===================================================== */
+async function loadPesanHarian() {
+  const box = document.getElementById('pesanHarian');
+
+  try {
+    box.className = 'loading';
+    box.textContent = 'Memuat informasi hari ini...';
+
+    const dateKey = getLocalDateKey();
+    const sessionKey = 'absensi_guru_pesan_' + dateKey;
+    let result = null;
+
+    try {
+      const cached = sessionStorage.getItem(sessionKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        // Jangan gunakan cache error atau cache dari tanggal server yang berbeda.
+        if (parsed && parsed.success && parsed.tanggal === dateKey) {
+          result = parsed;
+        } else if (cached) {
+          sessionStorage.removeItem(sessionKey);
+        }
+      }
+    } catch (cacheError) {
+      console.log('Cache pesan harian tidak dapat dibaca:', cacheError);
+      try { sessionStorage.removeItem(sessionKey); } catch (removeError) {}
+    }
+
+    if (!result) {
+      const response = await fetch(
+        WEB_APP_URL + '?action=getPesanHarian&d=' + dateKey,
+        { method: 'GET', cache: 'force-cache' }
+      );
+
+      if (!response.ok) {
+        throw new Error('Server mengembalikan status ' + response.status);
+      }
+
+      result = await response.json();
+
+      // Hanya cache respons sukses. Error sementara harus bisa dicoba lagi.
+      if (result && result.success && result.tanggal === dateKey) {
+        try {
+          sessionStorage.setItem(sessionKey, JSON.stringify(result));
+        } catch (cacheError) {
+          console.log('Cache pesan harian tidak dapat disimpan:', cacheError);
+        }
+      }
+    }
+
+    if (!result.success || !result.adaPesan) {
+      box.style.display = 'none';
+      box.className = '';
+      return;
+    }
+
+    box.innerHTML = '';
+    box.className = '';
+
+    if (String(result.jenis).toUpperCase() === 'GAMBAR') {
+      box.classList.add('gambar');
+
+      const img = document.createElement('img');
+      img.src = result.urlGambar;
+      img.alt = result.isi || 'Informasi hari ini';
+      img.loading = 'eager';
+
+      img.onerror = function () {
+        box.className = 'loading';
+        box.textContent =
+          'Gambar informasi hari ini tidak dapat ditampilkan.';
+      };
+
+      box.appendChild(img);
+
+      if (result.isi) {
+        const teks = document.createElement('div');
+        teks.className = 'pesan-teks';
+        teks.textContent = result.isi;
+        box.appendChild(teks);
+      }
+    } else {
+      const teks = document.createElement('div');
+      teks.className = 'pesan-teks';
+      teks.textContent = result.isi || '';
+      box.appendChild(teks);
+    }
+
+    if (result.tanggal) {
+      const tanggal = document.createElement('div');
+      tanggal.className = 'pesan-tanggal';
+      tanggal.textContent = 'Informasi hari ini';
+      box.appendChild(tanggal);
+    }
+
+    box.style.display = 'block';
+
+  } catch (error) {
+    console.error('Gagal memuat pesan harian:', error);
+    box.style.display = 'none';
+    box.className = '';
+  }
+}
+
+/* =====================================================
+   STATUS
+   ===================================================== */
 function showStatus(pesan, tipe) {
-
   const status = document.getElementById('status');
-
   status.className = tipe;
   status.textContent = pesan;
 }
 
-
-// =====================================================
-// BUKA SCANNER
-// =====================================================
-
+/* =====================================================
+   KAMERA
+   QrScanner + Autofocus + Auto Zoom
+   ===================================================== */
 async function startScanner() {
-
   if (sedangProses) return;
 
+  const btnCamera = document.getElementById('btnCamera');
+
+  if (scanner) {
+    showStatus('Kamera masih aktif.', 'info');
+    return;
+  }
+
   try {
+    btnCamera.disabled = true;
+    document.getElementById('reader').innerHTML = '';
 
-    showStatus('Membuka kamera...', 'info');
+    showStatus(
+      'Membuka kamera dan mengoptimalkan fokus...',
+      'info'
+    );
 
-    scanner = new Html5Qrcode('reader');
+    if (!window.QrScanner) {
+      throw new Error('Pustaka QR Scanner gagal dimuat.');
+    }
 
-    await scanner.start(
+    scanner = new QrScanner(
+      document.getElementById('reader'),
+      result => {
+        const decodedText =
+          typeof result === 'string' ? result : result.data;
 
-      { facingMode: 'environment' },
-
-      {
-        fps: 10,
-        qrbox: 250
+        if (decodedText) onScanSuccess(decodedText);
       },
-
-      onScanSuccess,
-
-      function() {
-        // Error pembacaan QR diabaikan
+      {
+        preferredCamera: 'environment',
+        maxScansPerSecond: 12,
+        highlightScanRegion: true,
+        highlightCodeOutline: true,
+        returnDetailedScanResult: true,
+        onDecodeError: () => {}
       }
     );
+
+    await scanner.start();
+
+    await tungguVideoAktif();
+    await optimalkanKamera();
+
+    scanStartedAt = Date.now();
 
     showStatus(
       'Kamera aktif. Arahkan ke QR Code Guru.',
@@ -212,90 +417,294 @@ async function startScanner() {
     );
 
   } catch (error) {
+    console.error('Gagal membuka kamera:', error);
 
-    console.error(error);
+    await bersihkanScanner();
 
     showStatus(
       'Kamera gagal dibuka: ' +
       (error.message || error),
       'error'
     );
+
+  } finally {
+    btnCamera.disabled = !!scanner;
   }
 }
 
+/* =====================================================
+   TUNGGU VIDEO AKTIF
+   ===================================================== */
+async function tungguVideoAktif() {
+  const video = document.querySelector('#reader video');
 
-// =====================================================
-// QR BERHASIL DIBACA
-// =====================================================
+  if (!video) return;
 
+  for (let i = 0; i < 30; i++) {
+    if (video.readyState >= 2 && video.srcObject) {
+      cameraStream = video.srcObject;
+      const tracks = cameraStream.getVideoTracks();
+
+      if (tracks.length) {
+        cameraTrack = tracks[0];
+        return;
+      }
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
+
+/* =====================================================
+   OPTIMASI KAMERA
+   - continuous autofocus bila didukung
+   - auto zoom bertahap bila didukung
+   ===================================================== */
+async function optimalkanKamera() {
+  if (!cameraTrack) return;
+
+  const capabilities =
+    typeof cameraTrack.getCapabilities === 'function'
+      ? cameraTrack.getCapabilities()
+      : {};
+
+  const settings =
+    typeof cameraTrack.getSettings === 'function'
+      ? cameraTrack.getSettings()
+      : {};
+
+  /* ---------- AUTOFOCUS ---------- */
+  if (capabilities.focusMode) {
+    const modes = Array.isArray(capabilities.focusMode)
+      ? capabilities.focusMode
+      : [];
+
+    try {
+      if (modes.includes('continuous')) {
+        await cameraTrack.applyConstraints({
+          advanced: [{ focusMode: 'continuous' }]
+        });
+      } else if (modes.includes('single-shot')) {
+        await cameraTrack.applyConstraints({
+          advanced: [{ focusMode: 'single-shot' }]
+        });
+      }
+    } catch (err) {
+      console.log('Autofocus tidak dapat diterapkan:', err);
+    }
+  }
+
+  /* ---------- AUTO ZOOM ---------- */
+  if (capabilities.zoom) {
+    const min = Number(capabilities.zoom.min);
+    const max = Number(capabilities.zoom.max);
+    const step = Number(capabilities.zoom.step) || 0.1;
+
+    if (Number.isFinite(min) &&
+        Number.isFinite(max) &&
+        max > min) {
+
+      const current = Number(settings.zoom);
+      lastZoom = Number.isFinite(current) ? current : min;
+
+      // Mulai sedikit di atas zoom minimum agar QR jarak menengah
+      // lebih mudah dibaca, tetapi jangan langsung maksimum.
+      const startZoom = clamp(
+        lastZoom,
+        min,
+        Math.min(max, min + Math.max(step * 2, (max - min) * 0.12))
+      );
+
+      await applyZoom(startZoom);
+
+      // Naikkan zoom perlahan jika QR belum ditemukan.
+      // Berhenti otomatis ketika QR terbaca karena onScanSuccess
+      // memanggil stop/cleanup.
+      clearInterval(autoZoomTimer);
+
+      autoZoomTimer = setInterval(async () => {
+        if (sedangProses || !scanner || !cameraTrack) {
+          clearInterval(autoZoomTimer);
+          autoZoomTimer = null;
+          return;
+        }
+
+        const elapsed = Date.now() - scanStartedAt;
+
+        // Beri scanner kesempatan membaca pada zoom sekarang.
+        // Setelah beberapa detik, naikkan sedikit.
+        if (elapsed < 1800) return;
+
+        const currentZoom = Number(lastZoom);
+        const increment = Math.max(step, (max - min) * 0.08);
+        const nextZoom = Math.min(max, currentZoom + increment);
+
+        if (nextZoom > currentZoom + 0.0001) {
+          await applyZoom(nextZoom);
+        } else {
+          clearInterval(autoZoomTimer);
+          autoZoomTimer = null;
+        }
+      }, 1800);
+    }
+  }
+}
+
+/* =====================================================
+   TERAPKAN ZOOM DENGAN AMAN
+   ===================================================== */
+async function applyZoom(value) {
+  if (!cameraTrack) return;
+
+  const capabilities =
+    cameraTrack.getCapabilities();
+
+  if (!capabilities.zoom) return;
+
+  const min = Number(capabilities.zoom.min);
+  const max = Number(capabilities.zoom.max);
+  const step = Number(capabilities.zoom.step) || 0.1;
+
+  let zoom = clamp(Number(value), min, max);
+
+  if (step > 0) {
+    zoom = min + Math.round((zoom - min) / step) * step;
+    zoom = clamp(zoom, min, max);
+  }
+
+  try {
+    await cameraTrack.applyConstraints({
+      advanced: [{ zoom: zoom }]
+    });
+
+    lastZoom = zoom;
+  } catch (err) {
+    console.log('Auto zoom tidak dapat diterapkan:', err);
+  }
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+/* =====================================================
+   QR BERHASIL DIBACA
+   ===================================================== */
 async function onScanSuccess(decodedText) {
-
   if (sedangProses) return;
 
   sedangProses = true;
+  const statusAbsensi = mode;
 
   const idGuru = String(decodedText).trim();
+
+  if (!idGuru) {
+    sedangProses = false;
+    return;
+  }
+
+  clearInterval(autoZoomTimer);
+  autoZoomTimer = null;
 
   showStatus(
     'QR terbaca. Mengambil lokasi GPS...',
     'info'
   );
 
+  if (!navigator.geolocation) {
+    sedangProses = false;
+    document.getElementById('btnCamera').disabled = false;
 
-  // Hentikan kamera
-  try {
-    await scanner.stop();
-    await scanner.clear();
-  } catch (e) {
-    console.log(e);
+    showStatus(
+      'Perangkat tidak mendukung GPS.',
+      'error'
+    );
+    await bersihkanScanner();
+    return;
   }
 
+  try {
+    // GPS dan cleanup kamera berjalan bersamaan agar waktu tunggu total
+    // tidak menjadi penjumlahan keduanya.
+    const [position] = await Promise.all([
+      ambilLokasiGPS(),
+      bersihkanScanner()
+    ]);
 
-  // Ambil GPS
-  navigator.geolocation.getCurrentPosition(
+    await kirimAbsensi(
+      idGuru,
+      position.coords.latitude,
+      position.coords.longitude,
+      statusAbsensi
+    );
+  } catch (error) {
+    sedangProses = false;
+    document.getElementById('btnCamera').disabled = false;
 
-    function(position) {
-
-      kirimAbsensi(
-        idGuru,
-        position.coords.latitude,
-        position.coords.longitude
-      );
-
-    },
-
-    function(error) {
-
-      sedangProses = false;
-
-      showStatus(
-        'GPS tidak dapat diakses: ' +
-        error.message,
-        'error'
-      );
-    },
-
-    {
-      enableHighAccuracy: true,
-      timeout: 20000,
-      maximumAge: 0
-    }
-  );
+    showStatus(
+      'GPS tidak dapat diakses: ' +
+      (error.message || error),
+      'error'
+    );
+  }
 }
 
+/* =====================================================
+   AMBIL LOKASI GPS
+   ===================================================== */
+function ambilLokasiGPS() {
+  return new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: true,
+      timeout: 10000,
+      maximumAge: 5000
+    });
+  });
+}
 
-// =====================================================
-// KIRIM KE GOOGLE APPS SCRIPT
-// =====================================================
+/* =====================================================
+   BERSIHKAN SCANNER DAN KAMERA
+   ===================================================== */
+async function bersihkanScanner() {
+  clearInterval(autoZoomTimer);
+  autoZoomTimer = null;
 
+  const activeScanner = scanner;
+  scanner = null;
+
+  try {
+    if (activeScanner) {
+      try {
+        if (activeScanner.isScanning) {
+          await activeScanner.stop();
+        }
+      } catch (e) {
+        console.log('Gagal stop QrScanner:', e);
+      }
+
+      try {
+        activeScanner.destroy();
+      } catch (e) {
+        console.log('Gagal destroy QrScanner:', e);
+      }
+    }
+  } finally {
+    cameraTrack = null;
+    cameraStream = null;
+    document.getElementById('reader').innerHTML = '';
+  }
+}
+
+/* =====================================================
+   KIRIM KE GOOGLE APPS SCRIPT
+   ===================================================== */
 async function kirimAbsensi(
   idGuru,
   latitude,
-  longitude
+  longitude,
+  statusAbsensi
 ) {
-
   try {
-
     showStatus(
       'Mengirim absensi...',
       'info'
@@ -305,10 +714,9 @@ async function kirimAbsensi(
       WEB_APP_URL,
       {
         method: 'POST',
-
         body: JSON.stringify({
           idGuru: idGuru,
-          status: mode,
+          status: statusAbsensi,
           latitude: latitude,
           longitude: longitude
         })
@@ -318,7 +726,6 @@ async function kirimAbsensi(
     const result = await response.json();
 
     if (result.success) {
-
       showStatus(
         'ABSENSI BERHASIL\n' +
         result.message +
@@ -328,9 +735,7 @@ async function kirimAbsensi(
         '\nJarak: ' + result.jarak + ' meter',
         'success'
       );
-
     } else {
-
       showStatus(
         result.message,
         'error'
@@ -338,7 +743,6 @@ async function kirimAbsensi(
     }
 
   } catch (error) {
-
     console.error(error);
 
     showStatus(
@@ -348,11 +752,18 @@ async function kirimAbsensi(
     );
 
   } finally {
-
     sedangProses = false;
+    scanner = null;
+    cameraTrack = null;
+    cameraStream = null;
+    document.getElementById('btnCamera').disabled = false;
   }
 }
 
+/* =====================================================
+   MULAI
+   ===================================================== */
+loadPesanHarian();
 </script>
 
 </body>
