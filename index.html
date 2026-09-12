@@ -157,12 +157,15 @@
       background: #111827;
     }
 
-    #reader video {
+    #reader video,
+    #qrVideo {
       width: 100% !important;
       height: auto !important;
+      min-height: 260px;
       display: block;
       object-fit: cover;
       border-radius: 14px;
+      background: #111827;
     }
 
     #reader canvas {
@@ -386,8 +389,51 @@ async function startScanner() {
       throw new Error('Pustaka QR Scanner gagal dimuat.');
     }
 
+    if (!window.isSecureContext) {
+      throw new Error('Kamera membutuhkan HTTPS atau koneksi aman.');
+    }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('Browser/WebView tidak menyediakan akses kamera.');
+    }
+
+    // Minta izin kamera secara eksplisit terlebih dahulu. Ini membantu
+    // browser Android menampilkan dialog izin sebelum QrScanner berjalan.
+    try {
+      const permissionStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' }
+        },
+        audio: false
+      });
+      permissionStream.getTracks().forEach(track => track.stop());
+    } catch (permissionError) {
+      const name = permissionError && permissionError.name;
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        throw new Error('Izin kamera ditolak. Izinkan Kamera untuk browser/aplikasi ini lalu coba lagi.');
+      }
+      if (name === 'NotFoundError') {
+        throw new Error('Kamera tidak ditemukan pada perangkat.');
+      }
+      throw permissionError;
+    }
+
+    // qr-scanner v1.4.2 membutuhkan elemen <video>, BUKAN <div>.
+    // Sebelumnya #reader (div) langsung diberikan ke QrScanner sehingga
+    // muncul error: "this.$video.play is not a function".
+    const reader = document.getElementById('reader');
+    reader.innerHTML = '';
+
+    const video = document.createElement('video');
+    video.setAttribute('playsinline', '');
+    video.setAttribute('autoplay', '');
+    video.muted = true;
+    video.id = 'qrVideo';
+    video.className = 'qr-video';
+    reader.appendChild(video);
+
     scanner = new QrScanner(
-      document.getElementById('reader'),
+      video,
       result => {
         const decodedText =
           typeof result === 'string' ? result : result.data;
